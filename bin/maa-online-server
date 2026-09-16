@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${MAA_ONLINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# Cloud gaming should normally connect directly rather than inherit a host proxy.
+if [ "${MAA_ONLINE_KEEP_PROXY:-0}" != "1" ]; then
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+fi
+
+cd "$ROOT/backend"
+exec "$ROOT/runtime/venv/bin/python" server.py

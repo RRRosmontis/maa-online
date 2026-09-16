@@ -1,0 +1,31 @@
+# Credentials and login state
+token
+token*
+.pending-login
+backend/token
+backend/token*
+backend/.pending-login
+.env
+
+# Generated user/runtime state
+runtime/
+config/profiles/cloud.toml
+config/tasks/daily.toml
+user_config/daily.toml
+user_config/backups/
+tests/fake-actions.jsonl
+artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs and editor files
+*.log
+*.tmp
+*.bak
+.DS_Store
+.idea/
+.vscode/

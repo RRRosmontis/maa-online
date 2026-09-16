@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${MAA_ONLINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export HOME="${MAA_ONLINE_HOME:-$ROOT/runtime/home}"
+export MAA_CONFIG_DIR="${MAA_CONFIG_DIR:-$ROOT/config}"
+MAA_BIN="${MAA_BIN:-$ROOT/runtime/bin/maa}"
+
+retry() {
+    local attempt
+    for attempt in 1 2 3; do
+        if "$@"; then return 0; fi
+        echo "Attempt ${attempt}/3 failed: $*" >&2
+        sleep $((attempt * 2))
+    done
+    return 1
+}
+
+direct() {
+    if [ "${MAA_ONLINE_KEEP_PROXY:-0}" = "1" ]; then "$@"; else env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY "$@"; fi
+}
+
+echo '[1/3] Updating maa-cli'
+retry direct timeout 90s "$MAA_BIN" self update
+
+echo '[2/3] Updating official MaaCore and base resources'
+retry direct timeout 150s "$MAA_BIN" update stable --batch
+
+resource_repo="$HOME/.local/share/maa/MaaResource"
+if [ -d "$resource_repo/.git" ]; then git -C "$resource_repo" config http.version HTTP/1.1; fi
+
+echo '[3/3] Updating hot resources'
+retry direct timeout 90s "$MAA_BIN" hot-update --batch
+
+echo 'Update workflow completed.'

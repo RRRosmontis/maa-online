@@ -1,0 +1,7 @@
+aiohttp>=3.10,<4
+requests>=2.31,<3
+aiortc>=1.9,<2
+av>=12.3,<17
+numpy>=1.26,<3
+pillow>=10.3,<13
+websockets>=12,<16

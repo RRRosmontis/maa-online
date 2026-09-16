@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${MAA_ONLINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export HOME="${MAA_ONLINE_HOME:-$ROOT/runtime/home}"
+export MAA_CONFIG_DIR="${MAA_CONFIG_DIR:-$ROOT/config}"
+export MAA_ONLINE_API="${MAA_ONLINE_API:-http://127.0.0.1:22888}"
+MAA_BIN="${MAA_BIN:-$ROOT/runtime/bin/maa}"
+
+if [ "$#" -eq 0 ]; then
+    exec "$MAA_BIN" --help
+fi
+
+command_name="$1"
+shift
+case "$command_name" in
+    run|startup|closedown|fight|copilot|ssscopilot|paradoxcopilot|roguelike|reclamation)
+        exec "$MAA_BIN" "$command_name" --profile cloud "$@"
+        ;;
+    *)
+        exec "$MAA_BIN" "$command_name" "$@"
+        ;;
+esac

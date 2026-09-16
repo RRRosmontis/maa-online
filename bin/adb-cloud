@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Small ADB-command compatibility shim backed by maa-online HTTP API.
+
+It lets an unmodified MaaCore/maa-cli use the cloud-game backend, preserving
+maa-cli's normal `maa self update` and `maa update` mechanisms.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import os
+import shlex
+import socket
+import struct
+import sys
+import urllib.error
+import urllib.request
+from io import BytesIO
+from pathlib import Path
+
+try:
+    from PIL import Image
+except ModuleNotFoundError:
+    root = Path(__file__).resolve().parents[1]
+    venv_python = root / "runtime/venv/bin/python"
+    if venv_python.is_file() and Path(sys.executable) != venv_python:
+        os.execv(venv_python, [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+    raise
+
+BASE_URL = os.getenv("MAA_ONLINE_API", "http://127.0.0.1:22888").rstrip("/")
+SERIAL = os.getenv("MAA_ONLINE_ADB_SERIAL", "cloud-game:22888")
+TIMEOUT = float(os.getenv("MAA_ONLINE_ADB_TIMEOUT", "40"))
+
+
+def request(path: str, payload: dict | None = None) -> tuple[int, bytes, dict[str, str]]:
+    data = None
+    headers: dict[str, str] = {}
+    method = "GET"
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        method = "POST"
+    req = urllib.request.Request(BASE_URL + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+            return response.status, response.read(), dict(response.headers.items())
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), dict(exc.headers.items())
+
+
+def fetch_png() -> bytes:
+    status, body, headers = request("/screencap")
+    if status != 200:
+        raise RuntimeError(f"screencap failed: HTTP {status}: {body.decode(errors='replace')}")
+    content_type = headers.get("Content-Type", "")
+    if "image/png" not in content_type:
+        raise RuntimeError(f"unexpected screenshot content type: {content_type}")
+    return body
+
+
+def fetch_raw_screencap() -> bytes:
+    image = Image.open(BytesIO(fetch_png())).convert("RGBA")
+    # Android screencap raw format: little-endian width, height, format=RGBA_8888.
+    return struct.pack("<III", image.width, image.height, 1) + image.tobytes()
+
+
+def emit(data: bytes | str) -> None:
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    sys.stdout.buffer.write(data)
+
+
+def fail(message: str, code: int = 1) -> int:
+    print(message, file=sys.stderr)
+    return code
+
+
+def strip_global_options(argv: list[str]) -> list[str]:
+    result: list[str] = []
+    index = 0
+    options_with_value = {"-s", "-H", "-P", "-L", "--one-device"}
+    while index < len(argv):
+        if argv[index] in options_with_value and index + 1 < len(argv):
+            index += 2
+            continue
+        if argv[index] in {"-d", "-e", "-a"}:
+            index += 1
+            continue
+        result.extend(argv[index:])
+        break
+    return result
+
+
+def shell(command: str) -> int:
+    normalized = " ".join(command.strip().split())
+    if "settings get secure android_id" in normalized:
+        emit("6d61616f6e6c696e\n")
+    elif "getprop ro.build.version.release" in normalized:
+        emit("9\n")
+    elif "getprop ro.product.cpu.abilist" in normalized:
+        emit("x86_64,arm64-v8a,armeabi-v7a\n")
+    elif normalized.startswith("wm size"):
+        status, body, _ = request("/info")
+        if status != 200:
+            return fail(f"cloud backend unavailable: HTTP {status}")
+        info = json.loads(body)
+        if info.get("status") != "ok":
+            return fail(f"cloud backend is {info.get('status', 'not ready')}")
+        emit(f"{int(info['width'])}\n{int(info['height'])}\n")
+    elif "SurfaceOrientation" in normalized:
+        emit("0\n")
+    elif "SurfaceFlinger --latency" in normalized:
+        emit("33333333\n")
+    elif normalized.startswith("input tap "):
+        fields = normalized.split()
+        status, body, _ = request("/click", {"x": int(fields[-2]), "y": int(fields[-1])})
+        if status != 200:
+            return fail(f"click failed: HTTP {status}: {body.decode(errors='replace')}")
+    elif normalized.startswith("input swipe "):
+        fields = normalized.split()
+        status, body, _ = request(
+            "/swipe",
+            {
+                "x1": int(fields[-5]), "y1": int(fields[-4]),
+                "x2": int(fields[-3]), "y2": int(fields[-2]),
+                "duration": int(fields[-1]),
+            },
+        )
+        if status != 200:
+            return fail(f"swipe failed: HTTP {status}: {body.decode(errors='replace')}")
+    elif normalized.startswith("input text "):
+        text = normalized.removeprefix("input text ")
+        status, body, _ = request("/input", {"text": text})
+        if status != 200:
+            return fail(f"text input failed: HTTP {status}: {body.decode(errors='replace')}")
+    elif normalized.startswith("input keyevent "):
+        return fail("cloud backend key events are not implemented")
+    elif normalized.startswith("am start "):
+        status, body, _ = request("/start", {})
+        if status not in {200, 202}:
+            return fail(f"cloud start failed: HTTP {status}: {body.decode(errors='replace')}")
+        # MaaCore's legacy startup probe treats a sufficiently long `am start`
+        # response as confirmation that Android accepted the launch request.
+        emit(
+            "Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] "
+            "flg=0x10200000 cmp=com.hypergryph.arknights/com.u8.sdk.U8UnityContext }\n"
+            "Status: ok\nActivity: com.hypergryph.arknights/com.u8.sdk.U8UnityContext\n"
+        )
+    elif normalized.startswith("am force-stop "):
+        status, body, _ = request("/exit", {})
+        if status != 200:
+            return fail(f"cloud stop failed: HTTP {status}: {body.decode(errors='replace')}")
+    elif normalized.startswith(("dumpsys input", "cat /proc/net/arp")):
+        emit("0\n")
+    else:
+        return fail(f"unsupported adb shell command: {normalized}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    args = strip_global_options(argv)
+    if not args:
+        return fail("adb-cloud: missing command")
+    if args[0] == "devices":
+        emit(f"List of devices attached\n{SERIAL}\tdevice\n")
+        return 0
+    if args[0] == "connect":
+        emit(f"already connected to {args[1] if len(args) > 1 else SERIAL}\n")
+        return 0
+    if args[0] in {"start-server", "kill-server", "wait-for-device"}:
+        return 0
+    if args[0] == "get-state":
+        emit("device\n")
+        return 0
+    if args[0] == "exec-out":
+        command = " ".join(args[1:])
+        if "screencap" not in command:
+            return fail(f"unsupported adb exec-out command: {command}")
+        if "nc " in command:
+            fields = shlex.split(command)
+            nc_index = fields.index("nc")
+            # MaaCore passes the host address as seen from an Android guest
+            # (often 10.0.2.2). The shim itself runs on the host, so loop back.
+            host, port = "127.0.0.1", int(fields[-1])
+            if nc_index < 0:
+                return fail(f"invalid nc screencap command: {command}")
+            with socket.create_connection((host, port), timeout=TIMEOUT) as connection:
+                connection.sendall(fetch_raw_screencap())
+            return 0
+        if "gzip" in command:
+            emit(gzip.compress(fetch_raw_screencap(), compresslevel=1))
+            return 0
+        emit(fetch_png())
+        return 0
+    if args[0] == "shell":
+        return shell(" ".join(args[1:]))
+    return fail(f"unsupported adb command: {' '.join(args)}")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"adb-cloud: {exc}")

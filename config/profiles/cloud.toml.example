@@ -1,0 +1,12 @@
+[connection]
+adb_path = "__ROOT__/bin/adb-cloud"
+address = "cloud-game:22888"
+config = "General"
+
+[instance_options]
+touch_mode = "ADB"
+adb_lite_enabled = false
+kill_adb_on_exit = false
+
+[behavior]
+auto_reconnect = false
