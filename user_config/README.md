@@ -195,3 +195,42 @@ curl -X POST http://127.0.0.1:22888/exit
 - 领取每日/每周任务奖励；
 - 领取所有邮件；
 - 任务结束后退出云游戏。
+
+## 自动定时与断点续跑
+
+仓库提供 systemd 单元，可让日常任务每天自动执行（安装见根目录 README 的「自动定时执行」一节）：
+
+| 单元 | 作用 |
+|---|---|
+| `maa-online-server.service` | 云游戏 API 常驻服务，崩溃自动重启，启动前清除代理环境变量 |
+| `maa-daily.timer` | 每天 04:00 起随机 0–2 小时触发 |
+| `maa-update.timer` | 每周日 03:20 起随机 30 分钟，更新 maa-cli / MaaCore / 资源 |
+
+`bin/maa-online-daily-run` 的流程：等待 API 就绪 → 规划剩余任务 → 启动云游戏 → 在停滞看门狗下
+执行任务 → 失败则释放云会话并重试（默认最多 3 次）。
+
+看门狗会在出现连续 `ScreencapFailed` 或日志中的 `Disconnected` 时中止当前尝试；后端本身也会在信令
+WebSocket 被远端关闭、或视频流停滞超过 `MAA_ONLINE_STALE_LIMIT_SECONDS`（默认 120 秒）时主动拆掉
+会话，避免云实例空挂。
+
+**断点续跑**：第 2 次及之后的重试不再重跑整份 `daily.toml`。`bin/maa-resume-tasks.py` 读取前几次尝试
+的日志，跳过已出现 `<任务类型> Completed` 的任务，只把剩余任务写入
+`config/tasks/daily-resume.toml` 后执行。若所有任务都已完成，脚本直接判定成功，不再开新会话。
+`StartUp` 永不跳过：每次连接都是新的云实例，必须先进入游戏。
+
+手动补跑（例如某天中断后，用当天剩余额度把没做完的任务补上）：
+
+```bash
+MAA_ONLINE_RESUME_FROM="artifacts/maa-daily-20260919-053237.log" bin/maa-online-daily-run
+```
+
+查看执行情况：
+
+```bash
+systemctl list-timers maa-daily.timer
+journalctl -u maa-daily.service -n 50
+ls -lt artifacts/maa-daily-*.log | head
+```
+
+注意：网易云游戏免费额度有限（常见为每天 30 分钟），而一次完整日常约需 24 分钟，重试次数越多越容易
+额度耗尽。断点续跑正是为压缩重试开销而设计的，但仍建议关注额度消耗。

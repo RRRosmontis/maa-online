@@ -35,6 +35,7 @@ WIDTH = int(os.getenv("MAA_ONLINE_WIDTH", "1280"))
 HEIGHT = int(os.getenv("MAA_ONLINE_HEIGHT", "720"))
 FPS = os.getenv("MAA_ONLINE_FPS", "30")
 START_WAIT_SECONDS = float(os.getenv("MAA_ONLINE_START_WAIT_SECONDS", "30"))
+STALE_LIMIT = float(os.getenv("MAA_ONLINE_STALE_LIMIT_SECONDS", "120"))
 
 # --- 颜色定义 ---
 class Colors:
@@ -439,9 +440,26 @@ async def run_cloud_game():
             raise RuntimeError("failed to receive the first cloud-game video frame")
 
         # Use a cancellable wait instead of Event().wait()
-        # This allows the task to be properly cancelled by signals
+        # This allows the task to be properly cancelled by signals.
+        # Also watch for a dead cloud session: if the remote signaling
+        # websocket closes or the video stream stalls for too long, tear
+        # the session down (finally-block releases the NetEase session and
+        # closes the peer connection) so the next /start reconnects cleanly
+        # instead of serving 503s forever.
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
+            sock = app_state.sock
+            if sock is not None and sock.close_code is not None:
+                raise RuntimeError(
+                    f"cloud signaling websocket closed (code {sock.close_code}); tearing down session"
+                )
+            snapshotter = app_state.snapshotter
+            if snapshotter is not None:
+                last_recv = getattr(snapshotter, "_last_recv_ts", 0.0)
+                if last_recv and (time.monotonic() - last_recv) > STALE_LIMIT:
+                    raise RuntimeError(
+                        f"cloud video stream stale for over {STALE_LIMIT:.0f}s; tearing down session"
+                    )
 
     except asyncio.CancelledError:
         print(f"\n{Colors.CYAN}[*] Cloud game task cancelled.{Colors.RESET}")

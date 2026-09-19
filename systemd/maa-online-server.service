@@ -1,0 +1,16 @@
+[Unit]
+Description=MAA Online cloud game API server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__ROOT__/bin/maa-online-server
+Restart=always
+RestartSec=5
+# Belt and braces: never let a proxy environment leak into the cloud gaming
+# server (bin/maa-online-server already unsets these).
+Environment=NO_PROXY=localhost,127.0.0.1,::1
+
+[Install]
+WantedBy=multi-user.target

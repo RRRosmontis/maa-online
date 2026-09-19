@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Install (or refresh) the systemd units that schedule the MAA Online daily
+# task. Run as root. Units are rendered from systemd/*.tmpl-style sources in
+# this repository with __ROOT__ replaced by the checkout path.
+set -euo pipefail
+
+ROOT="${MAA_ONLINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SRC="$ROOT/systemd"
+DST="${MAA_ONLINE_SYSTEMD_DIR:-/etc/systemd/system}"
+UNITS=(maa-online-server.service maa-daily.service maa-daily.timer maa-update.service maa-update.timer)
+
+if [ "$(id -u)" != "0" ]; then
+    echo "error: must run as root (writes to $DST)" >&2
+    exit 1
+fi
+if [ ! -d "$SRC" ]; then
+    echo "error: $SRC not found" >&2
+    exit 1
+fi
+
+for unit in "${UNITS[@]}"; do
+    sed "s|__ROOT__|$ROOT|g" "$SRC/$unit" > "$DST/$unit"
+    echo "installed $DST/$unit"
+done
+
+systemctl daemon-reload
+systemctl enable --now maa-online-server.service
+systemctl enable maa-daily.timer maa-update.timer
+systemctl start maa-daily.timer maa-update.timer
+
+echo
+systemctl --no-pager list-timers maa-daily.timer maa-update.timer
+cat <<EOF
+
+MAA Online systemd units are active.
+  server log:  journalctl -u maa-online-server -f
+  daily log:   journalctl -u maa-daily -n 50
+  next runs:   systemctl list-timers maa-daily.timer maa-update.timer
+EOF

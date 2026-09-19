@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# MAA Online daily runner, designed for systemd oneshot execution.
+#
+# Flow: wait for the cloud API -> plan remaining tasks from earlier attempts ->
+# start a cloud session -> run the daily task file under a stall watchdog ->
+# on failure release the cloud session and retry (up to MAA_ONLINE_MAX_ATTEMPTS).
+#
+# Retries use resume mode: bin/maa-resume-tasks.py inspects the earlier
+# attempts' logs and only the tasks that never reported "<Type> Completed" are
+# run again, so a retry does not re-burn cloud-game minutes on finished work.
+#
+# Manual catch-up run (for example after a failed night, using the remaining
+# daily quota):
+#   MAA_ONLINE_RESUME_FROM="artifacts/maa-daily-<stamp>.log" bin/maa-online-daily-run
+set -uo pipefail
+
+ROOT="${MAA_ONLINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+API="${MAA_ONLINE_API:-http://127.0.0.1:22888}"
+LOG_DIR="${MAA_ONLINE_LOG_DIR:-$ROOT/artifacts}"
+MAA_ONLINE_BIN="${MAA_ONLINE_BIN:-$ROOT/bin/maa-online}"
+PYTHON="${MAA_ONLINE_PYTHON:-$ROOT/runtime/venv/bin/python}"
+RESUME_HELPER="$ROOT/bin/maa-resume-tasks.py"
+DAILY_SOURCE="${MAA_ONLINE_DAILY_SOURCE:-$ROOT/config/tasks/daily.toml}"
+RESUME_FILE="${MAA_ONLINE_RESUME_OUT:-$ROOT/config/tasks/daily-resume.toml}"
+
+MAX_ATTEMPTS="${MAA_ONLINE_MAX_ATTEMPTS:-3}"
+STALL_FAILS="${MAA_ONLINE_STALL_FAILS:-12}"              # consecutive ScreencapFailed (~24s+)
+ATTEMPT_MAX_SECONDS="${MAA_ONLINE_ATTEMPT_MAX_SECONDS:-3000}"  # per-attempt ceiling
+
+mkdir -p "$LOG_DIR"
+
+api() { # api <METHOD> <PATH>
+    curl --noproxy '*' -fsS --max-time 180 -X "$1" "$API$2"
+}
+
+echo "[daily-run] $(date --iso-8601=seconds) waiting for cloud API at $API ..."
+ready=""
+for _ in $(seq 1 90); do
+    if api GET /info >/dev/null 2>&1; then ready=1; break; fi
+    sleep 2
+done
+if [ -z "$ready" ]; then
+    echo "[daily-run] ERROR: cloud API not ready after 180s" >&2
+    exit 2
+fi
+
+REASON=""
+run_daily_watchdog() { # arg1: log file, arg2: task file name; sets REASON on abort
+    local log="$1"
+    local task="$2"
+    REASON=""
+    "$MAA_ONLINE_BIN" run "$task" --batch -v --log-file="$log" &
+    local maa_pid=$!
+    while kill -0 "$maa_pid" 2>/dev/null; do
+        sleep 5
+        if [ $(( $(date +%s) - attempt_epoch )) -gt "$ATTEMPT_MAX_SECONDS" ]; then
+            REASON="attempt exceeded ${ATTEMPT_MAX_SECONDS}s ceiling"
+            break
+        fi
+        local streak
+        streak=$(awk '/ScreencapFailed/{c++; next} {c=0} END{print c+0}' "$log" 2>/dev/null)
+        if [ "${streak:-0}" -ge "$STALL_FAILS" ]; then
+            REASON="screencap stalled (${streak} consecutive failures; cloud session likely dead)"
+            break
+        fi
+        if grep -qE '\] Disconnected$' "$log" 2>/dev/null; then
+            REASON="MAA reported Disconnected (cloud session lost)"
+            break
+        fi
+    done
+    if [ -n "$REASON" ]; then
+        echo "[daily-run] watchdog: $REASON; aborting attempt" >&2
+        kill -INT "$maa_pid" 2>/dev/null
+        for _ in $(seq 1 6); do kill -0 "$maa_pid" 2>/dev/null || break; sleep 5; done
+        kill -0 "$maa_pid" 2>/dev/null && kill -9 "$maa_pid" 2>/dev/null
+        wait "$maa_pid" 2>/dev/null
+        return 1
+    fi
+    wait "$maa_pid" || { REASON="maa exited rc=$?"; return 1; }
+    return 0
+}
+
+attempt_logs=()
+if [ -n "${MAA_ONLINE_RESUME_FROM:-}" ]; then
+    read -r -a seeded <<< "$MAA_ONLINE_RESUME_FROM"
+    attempt_logs+=("${seeded[@]}")
+    echo "[daily-run] seeded resume planning with: ${attempt_logs[*]}"
+fi
+
+plan_tasks() { # echoes the task file to run ("daily", "daily-resume" or "NONE")
+    if [ "${#attempt_logs[@]}" -eq 0 ]; then
+        echo daily
+        return
+    fi
+    local result
+    result=$("$PYTHON" "$RESUME_HELPER" "${attempt_logs[@]}" \
+        --source "$DAILY_SOURCE" --out "$RESUME_FILE" 2>&1 | tail -n1)
+    case "$result" in
+        NONE)
+            echo NONE
+            ;;
+        RESUME_TASKS=*)
+            echo "[daily-run] resume plan: ${result#RESUME_TASKS=}" >&2
+            echo daily-resume
+            ;;
+        *)
+            echo "[daily-run] WARN: resume planning failed (${result}); using full daily" >&2
+            echo daily
+            ;;
+    esac
+}
+
+attempt=0
+while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
+    attempt=$((attempt + 1))
+    TASK_FILE=$(plan_tasks)
+    if [ "$TASK_FILE" = "NONE" ]; then
+        echo "[daily-run] $(date --iso-8601=seconds) every daily task already completed in an earlier attempt; nothing left to do"
+        exit 0
+    fi
+    echo "[daily-run] attempt $attempt/$MAX_ATTEMPTS: task file '$TASK_FILE'; starting cloud game ..."
+    if ! api POST /start; then
+        echo "[daily-run] attempt $attempt: /start failed (cloud service or token issue)" >&2
+        sleep 20
+        continue
+    fi
+    RUN_LOG="$LOG_DIR/maa-daily-$(date +%Y%m%d-%H%M%S).log"
+    echo "[daily-run] attempt $attempt: running '$TASK_FILE' (log: $RUN_LOG) ..."
+    attempt_epoch=$(date +%s)
+    if run_daily_watchdog "$RUN_LOG" "$TASK_FILE"; then
+        echo "[daily-run] $(date --iso-8601=seconds) daily completed successfully (attempt $attempt)"
+        exit 0
+    fi
+    attempt_logs+=("$RUN_LOG")
+    echo "[daily-run] attempt $attempt failed: ${REASON:-unknown}; releasing cloud session" >&2
+    api POST /exit >/dev/null 2>&1 || true
+    sleep 30
+done
+
+echo "[daily-run] ERROR: daily failed after $MAX_ATTEMPTS attempts (last: ${REASON:-unknown})" >&2
+echo "[daily-run] if the failure mentions login/token, re-run: runtime/venv/bin/python backend/login.py request <phone>" >&2
+exit 1

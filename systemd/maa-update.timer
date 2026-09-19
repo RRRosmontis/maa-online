@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly MAA Online maintenance, Sunday 03:20 (before the daily window)
+
+[Timer]
+OnCalendar=Sun *-*-* 03:20:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=maa-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=MAA Online daily task (Arknights via NetEase cloud game)
+Requires=maa-online-server.service
+After=maa-online-server.service
+
+[Service]
+Type=oneshot
+ExecStart=__ROOT__/bin/maa-online-daily-run
+# A normal run takes about 25 minutes; the runner's own per-attempt watchdog
+# aborts a hung session well before this ceiling.
+TimeoutStartSec=7200
+# Safety net: whatever stops the unit (success, failure, timeout), make sure
+# the remote cloud session is released.
+ExecStopPost=/bin/sh -c "/usr/bin/curl --noproxy '*' -fsS -X POST http://127.0.0.1:22888/exit || true"

@@ -134,6 +134,39 @@ bin/maa-online-update
 
 该脚本更新官方 maa-cli、MaaCore、基础资源和热更新资源。适配代码位于官方管理目录之外，不会被 `maa update` 清理。
 
+## 自动定时执行
+
+仓库自带 systemd 单元模板（`systemd/`）。以 root 执行：
+
+```bash
+sudo bin/maa-online-install-systemd
+```
+
+脚本会把单元渲染到 `/etc/systemd/system/`（`__ROOT__` 替换为当前检出路径）并启用：
+
+| 单元 | 作用 |
+|---|---|
+| `maa-online-server.service` | 云游戏 API 常驻服务（`Restart=always`，启动前清除代理环境变量） |
+| `maa-daily.timer` | 每天 04:00 起随机 0–2 小时触发日常任务 |
+| `maa-update.timer` | 每周日 03:20 起随机 30 分钟执行更新 |
+
+日常任务由 `bin/maa-online-daily-run` 驱动：等待 API 就绪 → 启动云游戏 → 在停滞看门狗下执行
+`config/tasks/daily.toml` → 失败则释放云会话并重试。定时器使用 `Persistent=true`，机器重启
+错过触发时间后会自动补跑；同一单元不会并发执行。
+
+重试采用**断点续跑**：`bin/maa-resume-tasks.py` 读取前几次尝试的日志，跳过已出现
+`<任务类型> Completed` 的任务，只运行剩余任务；若全部完成则直接判定成功，不再开启新会话。
+`StartUp` 永不跳过，因为每次 `/start` 都是全新的云实例。详见
+[`user_config/README.md`](user_config/README.md#自动定时与断点续跑)。
+
+查看运行情况：
+
+```bash
+systemctl list-timers maa-daily.timer maa-update.timer
+journalctl -u maa-daily.service -n 50
+journalctl -u maa-online-server.service -n 50
+```
+
 ## 离线测试
 
 启动假后端：
@@ -161,7 +194,9 @@ MaaCore -> adb-cloud -> fake backend: PASS
 - 云视频压缩与网络抖动会降低 MAA 图像识别稳定性；
 - 高频截图在低性能服务器上较慢，基建换班可能耗时较长；
 - Home/ESC 等键值尚未完整验证；
-- 断线自动恢复仍有限；
+- 云端会主动断开会话（信令 WebSocket close、视频流停滞）。后端会在检测到这类情况时自动拆除
+  会话并释放云端实例，日常包装脚本另有停滞看门狗与最多 3 次断点续跑重试，但仍无法保证每次都跑完；
+- 云游戏免费额度通常有限（常见为每天 30 分钟），一次完整日常约 24 分钟，重试会进一步消耗额度；
 - 后端可能出现少量 H.264 解码丢包警告；
 - 游戏自动化会真实消耗招聘许可、理智、信用等资源，请先 dry-run 并审阅配置。
 

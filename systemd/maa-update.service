@@ -1,0 +1,7 @@
+[Unit]
+Description=Weekly MAA Online maintenance (maa-cli, MaaCore and resource updates)
+
+[Service]
+Type=oneshot
+ExecStart=__ROOT__/bin/maa-online-update
+TimeoutStartSec=1800

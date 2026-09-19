@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MAA Online daily at a random moment between 04:00 and 06:00
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=2h
+Persistent=true
+Unit=maa-daily.service
+
+[Install]
+WantedBy=timers.target
