@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Guard for maa-online-recycle.service.
+#
+# Exit 0 when it is safe to restart the cloud game API server, exit 1 when a
+# daily run is in progress. Restarting the server underneath a running task
+# breaks that attempt, and the recycle timer fires right next to the daily
+# window, so the recycle must never race with it.
+set -uo pipefail
+
+state=$(systemctl show -p ActiveState --value maa-daily.service 2>/dev/null || echo unknown)
+case "$state" in
+    active|activating|reloading|deactivating)
+        echo "maa-daily.service is '$state'; skipping recycle" >&2
+        exit 1
+        ;;
+esac
+
+# Cover a run started by hand (bin/maa-online-daily-run outside systemd).
+if pgrep -x maa >/dev/null 2>&1; then
+    echo "a maa task is running; skipping recycle" >&2
+    exit 1
+fi
+
+exit 0

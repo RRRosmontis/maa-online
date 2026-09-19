@@ -9,6 +9,10 @@ ExecStart=__ROOT__/bin/maa-online-daily-run
 # A normal run takes about 25 minutes; the runner's own per-attempt watchdog
 # aborts a hung session well before this ceiling.
 TimeoutStartSec=7200
-# Safety net: whatever stops the unit (success, failure, timeout), make sure
-# the remote cloud session is released.
+# Safety net: whatever stops the unit (success, failure, timeout), release the
+# remote cloud session first...
 ExecStopPost=/bin/sh -c "/usr/bin/curl --noproxy '*' -fsS -X POST http://127.0.0.1:22888/exit || true"
+# ...then recycle the API server. A streaming session leaves gigabytes of cold
+# anonymous memory in glibc malloc arenas that is never returned to the OS;
+# without a recycle it accumulates until the whole swap file is used up.
+ExecStopPost=/bin/systemctl --no-block restart maa-online-server.service

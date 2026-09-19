@@ -1,0 +1,12 @@
+[Unit]
+Description=Recycle the MAA Online cloud game API server (reclaim swapped anonymous memory)
+
+[Service]
+Type=oneshot
+# Never recycle while a daily run is in progress: the timer fires next to the
+# daily window, so a run can already be underway.
+ExecCondition=__ROOT__/bin/maa-online-can-recycle
+# Streaming sessions churn large temporaries across the asyncio/aiohttp/aiortc
+# thread pool; glibc keeps the freed arenas, so a restart is what actually
+# returns the memory (including anything parked in swap) to the OS.
+ExecStart=/bin/systemctl restart maa-online-server.service

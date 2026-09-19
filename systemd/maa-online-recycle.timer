@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily recycle of the MAA Online API server just before the Arknights daily reset
+
+[Timer]
+# 03:59 sits immediately ahead of the 04:00 in-game daily reset and of the
+# maa-daily.timer window (04:00 + up to 2h), so the API server is freshly
+# recycled exactly when the daily run starts. Adjust both if the game server's
+# reset time differs.
+OnCalendar=*-*-* 03:59:00
+RandomizedDelaySec=0
+# No catch-up run: a late recycle could otherwise land inside the daily window.
+Persistent=false
+Unit=maa-online-recycle.service
+
+[Install]
+WantedBy=timers.target

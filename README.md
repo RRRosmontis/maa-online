@@ -146,13 +146,19 @@ sudo bin/maa-online-install-systemd
 
 | 单元 | 作用 |
 |---|---|
-| `maa-online-server.service` | 云游戏 API 常驻服务（`Restart=always`，启动前清除代理环境变量） |
+| `maa-online-server.service` | 云游戏 API 常驻服务（`Restart=always`，启动前清除代理环境变量，限制 malloc arena 数量） |
 | `maa-daily.timer` | 每天 04:00 起随机 0–2 小时触发日常任务 |
+| `maa-online-recycle.timer` | 每天 03:59（游戏每日刷新前）重启 API 服务，回收内存 |
 | `maa-update.timer` | 每周日 03:20 起随机 30 分钟执行更新 |
 
 日常任务由 `bin/maa-online-daily-run` 驱动：等待 API 就绪 → 启动云游戏 → 在停滞看门狗下执行
 `config/tasks/daily.toml` → 失败则释放云会话并重试。定时器使用 `Persistent=true`，机器重启
 错过触发时间后会自动补跑；同一单元不会并发执行。
+
+**内存回收**：一次流媒体会话会在 glibc 的 malloc arena 里留下大量不归还操作系统的冷匿名内存
+（实测单个服务可累积到 2.5 GB 并填满 swap），因此有两层回收：`maa-daily.service` 在结束时
+重启 API 服务（`ExecStopPost`），`maa-online-recycle.timer` 每天再独立回收一次。回收服务带
+`ExecCondition=bin/maa-online-can-recycle` 守卫，日常任务运行期间会被自动跳过，不会打断任务。
 
 重试采用**断点续跑**：`bin/maa-resume-tasks.py` 读取前几次尝试的日志，跳过已出现
 `<任务类型> Completed` 的任务，只运行剩余任务；若全部完成则直接判定成功，不再开启新会话。
@@ -162,7 +168,7 @@ sudo bin/maa-online-install-systemd
 查看运行情况：
 
 ```bash
-systemctl list-timers maa-daily.timer maa-update.timer
+systemctl list-timers maa-daily.timer maa-update.timer maa-online-recycle.timer
 journalctl -u maa-daily.service -n 50
 journalctl -u maa-online-server.service -n 50
 ```

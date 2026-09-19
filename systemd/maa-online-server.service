@@ -11,6 +11,12 @@ RestartSec=5
 # Belt and braces: never let a proxy environment leak into the cloud gaming
 # server (bin/maa-online-server already unsets these).
 Environment=NO_PROXY=localhost,127.0.0.1,::1
+# Streaming sessions churn large temporaries (video frames, PNG buffers) across
+# the asyncio/aiohttp/aiortc thread pool. glibc gives each thread its own 64 MB
+# malloc arena and never returns it to the OS, so the service used to ratchet up
+# to gigabytes of cold anonymous memory and eventually fill the swap file.
+# Capping the arena count keeps the footprint flat.
+Environment=MALLOC_ARENA_MAX=2
 
 [Install]
 WantedBy=multi-user.target

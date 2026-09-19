@@ -202,12 +202,18 @@ curl -X POST http://127.0.0.1:22888/exit
 
 | 单元 | 作用 |
 |---|---|
-| `maa-online-server.service` | 云游戏 API 常驻服务，崩溃自动重启，启动前清除代理环境变量 |
+| `maa-online-server.service` | 云游戏 API 常驻服务，崩溃自动重启，启动前清除代理环境变量，限制 malloc arena 数量 |
 | `maa-daily.timer` | 每天 04:00 起随机 0–2 小时触发 |
+| `maa-online-recycle.timer` | 每天 03:59（游戏每日刷新前）重启 API 服务以回收内存 |
 | `maa-update.timer` | 每周日 03:20 起随机 30 分钟，更新 maa-cli / MaaCore / 资源 |
 
 `bin/maa-online-daily-run` 的流程：等待 API 就绪 → 规划剩余任务 → 启动云游戏 → 在停滞看门狗下
 执行任务 → 失败则释放云会话并重试（默认最多 3 次）。
+
+**内存回收**：流媒体会话会在 glibc malloc arena 中留下大量不归还操作系统的冷匿名内存（实测可累积
+到 GB 级并占满 swap）。因此 `maa-daily.service` 结束时会重启 API 服务，另有
+`maa-online-recycle.timer` 每天独立回收一次；回收服务在 `bin/maa-online-can-recycle` 守卫下运行，
+日常任务进行期间会自动跳过，不会打断任务。
 
 看门狗会在出现连续 `ScreencapFailed` 或日志中的 `Disconnected` 时中止当前尝试；后端本身也会在信令
 WebSocket 被远端关闭、或视频流停滞超过 `MAA_ONLINE_STALE_LIMIT_SECONDS`（默认 120 秒）时主动拆掉
