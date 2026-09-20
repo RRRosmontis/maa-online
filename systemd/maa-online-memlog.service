@@ -1,0 +1,8 @@
+[Unit]
+Description=Sample MAA Online server memory/swap into a CSV log
+
+[Service]
+Type=oneshot
+ExecStart=__ROOT__/bin/maa-online-memlog
+# Pure observation: keep it from competing with the streaming workload.
+Nice=10

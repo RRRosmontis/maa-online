@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="${MAA_ONLINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SRC="$ROOT/systemd"
 DST="${MAA_ONLINE_SYSTEMD_DIR:-/etc/systemd/system}"
-UNITS=(maa-online-server.service maa-daily.service maa-daily.timer maa-update.service maa-update.timer maa-online-recycle.service maa-online-recycle.timer)
+UNITS=(maa-online-server.service maa-daily.service maa-daily.timer maa-update.service maa-update.timer maa-online-recycle.service maa-online-recycle.timer maa-online-memlog.service maa-online-memlog.timer)
 
 if [ "$(id -u)" != "0" ]; then
     echo "error: must run as root (writes to $DST)" >&2
@@ -25,15 +25,16 @@ done
 
 systemctl daemon-reload
 systemctl enable --now maa-online-server.service
-systemctl enable maa-daily.timer maa-update.timer maa-online-recycle.timer
-systemctl start maa-daily.timer maa-update.timer maa-online-recycle.timer
+systemctl enable maa-daily.timer maa-update.timer maa-online-recycle.timer maa-online-memlog.timer
+systemctl start maa-daily.timer maa-update.timer maa-online-recycle.timer maa-online-memlog.timer
 
 echo
-systemctl --no-pager list-timers maa-daily.timer maa-update.timer maa-online-recycle.timer
+systemctl --no-pager list-timers maa-daily.timer maa-update.timer maa-online-recycle.timer maa-online-memlog.timer
 cat <<EOF
 
 MAA Online systemd units are active.
   server log:  journalctl -u maa-online-server -f
   daily log:   journalctl -u maa-daily -n 50
-  next runs:   systemctl list-timers maa-daily.timer maa-update.timer maa-online-recycle.timer
+  memory log:  tail -f $ROOT/logs/memlog.csv
+  next runs:   systemctl list-timers 'maa-*'
 EOF

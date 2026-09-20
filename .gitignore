@@ -16,6 +16,7 @@ user_config/daily.toml
 user_config/backups/
 tests/fake-actions.jsonl
 artifacts/
+logs/
 
 # Python
 __pycache__/

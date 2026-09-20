@@ -1,0 +1,12 @@
+[Unit]
+Description=Sample MAA Online server memory every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Persistent=false
+Unit=maa-online-memlog.service
+
+[Install]
+WantedBy=timers.target

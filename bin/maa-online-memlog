@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Continuously record MAA Online memory/swap behaviour into a log.
+
+Run once per minute by maa-online-memlog.timer. Each run appends one row to
+<ROOT>/logs/memlog.csv (auto-rotated at 5 MB, one generation kept) and prints a
+compact line to the journal.
+
+The numbers tracked here are the ones that matter for the glibc malloc arena
+behaviour: the service cgroup's anonymous memory, how much of it has been
+pushed into swap, and how many large (>= 32 MB) anonymous mappings the process
+holds. An arena-bloat regression shows up as the big-region count climbing
+while the service is streaming.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(os.environ.get("MAA_ONLINE_ROOT") or Path(__file__).resolve().parent.parent)
+LOG_DIR = Path(os.environ.get("MAA_ONLINE_LOG_DIR", ROOT / "logs"))
+LOG = Path(os.environ.get("MAA_ONLINE_MEMLOG", LOG_DIR / "memlog.csv"))
+MAX_BYTES = int(os.environ.get("MAA_ONLINE_MEMLOG_MAX_BYTES", 5 * 1024 * 1024))
+
+CG = Path("/sys/fs/cgroup/system.slice/maa-online-server.service")
+API = os.environ.get("MAA_ONLINE_API", "http://127.0.0.1:22888")
+
+FIELDS = [
+    "timestamp",
+    "cloud_state",
+    "pid",
+    "proc_uptime_s",
+    "cg_current_mb",
+    "cg_peak_mb",
+    "cg_swap_mb",
+    "cg_swap_peak_mb",
+    "rss_mb",
+    "anon_regions",
+    "big_anon_regions",
+    "anon_total_mb",
+    "sys_mem_avail_mb",
+    "sys_swap_used_mb",
+    "sys_swap_free_mb",
+]
+
+MIB = 1048576
+
+
+def read_text(path: Path, default: str = "") -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return default
+
+
+def cg_value(name: str) -> int:
+    raw = read_text(CG / name, "0")
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def mb(value: int) -> float:
+    return round(value / MIB, 1)
+
+
+def main_pid() -> int:
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", "-p", "MainPID", "--value", "maa-online-server.service"],
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout.strip()
+        return int(out or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def proc_uptime(pid: int) -> int:
+    stat = read_text(Path(f"/proc/{pid}/stat"))
+    if not stat:
+        return 0
+    try:
+        start_ticks = int(stat.rsplit(")", 1)[1].split()[19])
+    except (IndexError, ValueError):
+        return 0
+    try:
+        with open("/proc/uptime") as handle:
+            uptime = float(handle.read().split()[0])
+    except (OSError, ValueError):
+        return 0
+    return int(uptime - start_ticks / os.sysconf("SC_CLK_TCK"))
+
+
+def proc_memory(pid: int) -> tuple[float, int, int, float]:
+    """Return (rss_mb, anon_regions, big_anon_regions, anon_total_mb)."""
+    rss = anon_regions = big_anon_regions = 0
+    anon_total = 0
+    try:
+        with open(f"/proc/{pid}/smaps") as handle:
+            for line in handle:
+                if line[0] in "0123456789abcdef" and "-" in line.split(" ", 1)[0]:
+                    parts = line.split()
+                    start, end = parts[0].split("-")
+                    size = (int(end, 16) - int(start, 16)) // 1024
+                    path = parts[5] if len(parts) > 5 else "[anon]"
+                    if path == "[anon]":
+                        anon_regions += 1
+                        anon_total += size
+                        if size >= 32 * 1024:
+                            big_anon_regions += 1
+                elif line.startswith("Rss:"):
+                    rss += int(line.split()[1])
+    except OSError:
+        pass
+    return round(rss / 1024, 1), anon_regions, big_anon_regions, round(anon_total / 1024, 1)
+
+
+def system_memory() -> tuple[float, float, float]:
+    values: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                key, _, rest = line.partition(":")
+                values[key] = int(rest.split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0.0, 0.0, 0.0
+    return (
+        mb(values.get("MemAvailable", 0) * 1024),
+        mb((values.get("SwapTotal", 0) - values.get("SwapFree", 0)) * 1024),
+        mb(values.get("SwapFree", 0) * 1024),
+    )
+
+
+def cloud_state() -> str:
+    try:
+        with urllib.request.urlopen(f"{API}/info", timeout=5) as response:
+            body = response.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError):
+        return "unreachable"
+    match = re.search(r'"status"\s*:\s*"([^"]+)"', body)
+    return match.group(1) if match else "unknown"
+
+
+def rotate_if_needed() -> None:
+    try:
+        if LOG.exists() and LOG.stat().st_size > MAX_BYTES:
+            backup = LOG.with_name(LOG.name + ".1")
+            backup.unlink(missing_ok=True)
+            LOG.rename(backup)
+    except OSError:
+        pass
+
+
+def main() -> int:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    rotate_if_needed()
+
+    pid = main_pid()
+    state = cloud_state()
+    if pid:
+        rss, anon_regions, big_regions, anon_total = proc_memory(pid)
+        uptime = proc_uptime(pid)
+    else:
+        rss = anon_total = 0.0
+        anon_regions = big_regions = uptime = 0
+
+    mem_avail, swap_used, swap_free = system_memory()
+    row = [
+        time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        state,
+        pid,
+        uptime,
+        mb(cg_value("memory.current")),
+        mb(cg_value("memory.peak")),
+        mb(cg_value("memory.swap.current")),
+        mb(cg_value("memory.swap.peak")),
+        rss,
+        anon_regions,
+        big_regions,
+        anon_total,
+        mem_avail,
+        swap_used,
+        swap_free,
+    ]
+
+    fresh = not LOG.exists() or LOG.stat().st_size == 0
+    with LOG.open("a", encoding="utf-8") as handle:
+        if fresh:
+            handle.write(",".join(FIELDS) + "\n")
+        handle.write(",".join(str(value) for value in row) + "\n")
+
+    print(
+        f"{row[0]} state={state} pid={pid} "
+        f"cg={row[4]}MB peak={row[5]}MB cg_swap={row[6]}MB "
+        f"rss={rss}MB anon_regions={anon_regions} big={big_regions} anon={anon_total}MB "
+        f"mem_avail={mem_avail}MB swap_used={swap_used}MB"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

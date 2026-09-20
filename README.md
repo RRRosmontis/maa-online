@@ -149,6 +149,7 @@ sudo bin/maa-online-install-systemd
 | `maa-online-server.service` | 云游戏 API 常驻服务（`Restart=always`，启动前清除代理环境变量，限制 malloc arena 数量） |
 | `maa-daily.timer` | 每天 04:00 起随机 0–2 小时触发日常任务 |
 | `maa-online-recycle.timer` | 每天 03:59（游戏每日刷新前）重启 API 服务，回收内存 |
+| `maa-online-memlog.timer` | 每分钟把服务内存/swap/arena 指标写入 `logs/memlog.csv` |
 | `maa-update.timer` | 每周日 03:20 起随机 30 分钟执行更新 |
 
 日常任务由 `bin/maa-online-daily-run` 驱动：等待 API 就绪 → 启动云游戏 → 在停滞看门狗下执行
@@ -168,10 +169,23 @@ sudo bin/maa-online-install-systemd
 查看运行情况：
 
 ```bash
-systemctl list-timers maa-daily.timer maa-update.timer maa-online-recycle.timer
+systemctl list-timers 'maa-*'
 journalctl -u maa-daily.service -n 50
 journalctl -u maa-online-server.service -n 50
 ```
+
+**内存观测**：`maa-online-memlog.timer` 每分钟运行 `bin/maa-online-memlog`，把服务 cgroup 的
+匿名内存、swap 占用、以及大于 32 MB 的匿名映射数量（arena 膨胀指纹）追加到 `logs/memlog.csv`
+（超过 5 MB 自动滚动，保留一代）。带表头的字段见脚本内的 `FIELDS`。用法示例：
+
+```bash
+tail -f logs/memlog.csv                                             # 实时观察
+awk -F, 'NR>1 && $11>0 {print $1, $10, $11, $12"MB"}' logs/memlog.csv  # 只看出现大 arena 的时刻
+```
+
+CSV 表头：`timestamp, cloud_state, pid, proc_uptime_s, cg_current_mb, cg_peak_mb, cg_swap_mb,
+cg_swap_peak_mb, rss_mb, anon_regions, big_anon_regions, anon_total_mb, sys_mem_avail_mb,
+sys_swap_used_mb, sys_swap_free_mb`。
 
 ## 离线测试
 

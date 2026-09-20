@@ -205,6 +205,7 @@ curl -X POST http://127.0.0.1:22888/exit
 | `maa-online-server.service` | 云游戏 API 常驻服务，崩溃自动重启，启动前清除代理环境变量，限制 malloc arena 数量 |
 | `maa-daily.timer` | 每天 04:00 起随机 0–2 小时触发 |
 | `maa-online-recycle.timer` | 每天 03:59（游戏每日刷新前）重启 API 服务以回收内存 |
+| `maa-online-memlog.timer` | 每分钟记录服务内存/swap/arena 指标到 `logs/memlog.csv` |
 | `maa-update.timer` | 每周日 03:20 起随机 30 分钟，更新 maa-cli / MaaCore / 资源 |
 
 `bin/maa-online-daily-run` 的流程：等待 API 就绪 → 规划剩余任务 → 启动云游戏 → 在停滞看门狗下
