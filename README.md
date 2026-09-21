@@ -174,18 +174,40 @@ journalctl -u maa-daily.service -n 50
 journalctl -u maa-online-server.service -n 50
 ```
 
-**内存观测**：`maa-online-memlog.timer` 每分钟运行 `bin/maa-online-memlog`，把服务 cgroup 的
-匿名内存、swap 占用、以及大于 32 MB 的匿名映射数量（arena 膨胀指纹）追加到 `logs/memlog.csv`
-（超过 5 MB 自动滚动，保留一代）。带表头的字段见脚本内的 `FIELDS`。用法示例：
+**内存观测**：`maa-online-memlog.timer` 每分钟运行 `bin/maa-online-memlog`，把服务 cgroup 的内存
+构成、swap 占用、进程 RSS 拆分（匿名 / 文件映射 / 其他）以及最大的文件映射追加到
+`logs/memlog.csv`（超过 5 MB 自动滚动，保留一代）。字段见脚本内的 `FIELDS`。用法示例：
 
 ```bash
-tail -f logs/memlog.csv                                             # 实时观察
-awk -F, 'NR>1 && $11>0 {print $1, $10, $11, $12"MB"}' logs/memlog.csv  # 只看出现大 arena 的时刻
+tail -f logs/memlog.csv                                  # 实时观察
+awk -F, 'NR>1 {print $1, $5, $20, $21, $22}' logs/memlog.csv   # cgroup / heap / 匿名 / 文件映射
 ```
 
-CSV 表头：`timestamp, cloud_state, pid, proc_uptime_s, cg_current_mb, cg_peak_mb, cg_swap_mb,
-cg_swap_peak_mb, rss_mb, anon_regions, big_anon_regions, anon_total_mb, sys_mem_avail_mb,
-sys_swap_used_mb, sys_swap_free_mb`。
+### 内存行为与可选的分配器调优
+
+实测（2026-09）：一次流媒体会话会让 API 服务的内存以约 **67 MB/分钟** 增长，跑完由回收机制清零。
+已内置的措施是 `MALLOC_ARENA_MAX=2`（把 glibc 的 mmap arena 从 33 个降到 1 个）加上两层回收
+（`maa-daily.service` 结束回收 + `maa-online-recycle.timer` 每日回收）。
+
+需要注意：`MALLOC_ARENA_MAX=2` 只是改变了增长的形态——分配从多个 arena 挤回主 arena 后，增长
+转入 brk 堆 `[heap]`，会话中 RSS 仍可达约 2.4 GB。回收机制因此仍是主要依靠；实测会话期间服务
+的 swap 占用为 0（更早期的版本曾累积到 2.6 GB swap）。
+
+以下措施**默认不启用**，因为会引入分配器开销，可能拖长任务时长：
+
+```ini
+# systemd/maa-online-server.service
+Environment=MALLOC_MMAP_THRESHOLD_=131072   # >=128KB 走 mmap，free 即归还内核
+Environment=MALLOC_TRIM_THRESHOLD_=131072   # 收缩堆顶
+```
+
+原因是这类负载下服务本身 CPU 占用很高（实测 35 分钟会话消耗约 14 分钟 CPU，单核约 40%），强制
+1–4 MB 的截图缓冲走 mmap/munmap 会带来 syscall、缺页与 TLB 抖动，而这正是 glibc 动态 mmap 阈值
+专门要避免的开销。若要启用，请先记录基线（任务耗时与 `logs/memlog.csv` 的 `cg_peak_mb`），启用
+后再对比；不划算就删掉这两行并重启服务回滚。
+
+其他同样未启用的选项：在 `backend/server.py` 里定期调用 `libc.malloc_trim(0)`（仅当空闲块位于堆顶
+时有效，开销极低）；降低 `MAA_ONLINE_FPS` 或分辨率以减少每帧缓冲的分配频率。
 
 ## 离线测试
 
