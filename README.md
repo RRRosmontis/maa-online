@@ -209,6 +209,20 @@ Environment=MALLOC_TRIM_THRESHOLD_=131072   # 收缩堆顶
 其他同样未启用的选项：在 `backend/server.py` 里定期调用 `libc.malloc_trim(0)`（仅当空闲块位于堆顶
 时有效，开销极低）；降低 `MAA_ONLINE_FPS` 或分辨率以减少每帧缓冲的分配频率。
 
+### 防止系统更新打断任务（needrestart）
+
+如果主机启用了 `unattended-upgrades`，升级完库之后 `needrestart` 会重启仍在使用旧库的服务。
+这类重启若落在日常任务窗口内，会直接打断当次执行，建议把 MAA 单元排除：
+
+```
+/etc/needrestart/conf.d/99-maa-online.conf
+$nrconf{override_rc}{qr(^maa-.*\.service$)} = 0;
+```
+
+`override_rc` 为假值时 needrestart 会把该单元记入 skipped 并跳过重启。API 服务本身有
+`Restart=always`，且每天 03:59 与每次任务结束后都会主动回收，不需要外部重启。
+检查方式：升级时段执行 `journalctl --since '-10 min' | grep -iE 'needrestart|Restarting services'`。
+
 ## 离线测试
 
 启动假后端：
