@@ -166,6 +166,13 @@ sudo bin/maa-online-install-systemd
 `StartUp` 永不跳过，因为每次 `/start` 都是全新的云实例。详见
 [`user_config/README.md`](user_config/README.md#自动定时与断点续跑)。
 
+**启动预检**：每次 `/start` 之后、交给 MAA 之前，包装脚本会先观察游戏画面（默认最多 13 分钟，
+`MAA_ONLINE_PREFLIGHT_MAX_SECONDS` 可调）：按截图体积分类画面状态（黑屏加载 / 登录屏 /
+标题屏 / 公告与主界面），对标题屏和登录屏自动点按推进，直到出现可识别的游戏画面才启动 MAA。
+每天的首次会话可能停在不可识别画面约 10 分钟（游戏在做每日首登的资源处理），没有这一步时
+MAA 会在每个任务上识别失败，整次尝试的额度被白白烧掉（2026-09-23 与 09-24 连续两天实测）。
+分类阈值标定在 `bin/maa-online-daily-run` 的注释里，游戏画面改版后可按需调整。
+
 查看运行情况：
 
 ```bash

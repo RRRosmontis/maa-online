@@ -2,8 +2,11 @@
 # MAA Online daily runner, designed for systemd oneshot execution.
 #
 # Flow: wait for the cloud API -> plan remaining tasks from earlier attempts ->
-# start a cloud session -> run the daily task file under a stall watchdog ->
-# on failure release the cloud session and retry (up to MAA_ONLINE_MAX_ATTEMPTS).
+# start a cloud session -> preflight (watch the screen, tap through title/login
+# until the game is recognizable -- the first session of the day may process
+# resources for ~10 min on a screen MAA cannot recognize) -> run the daily task
+# file under a stall watchdog -> on failure release the cloud session and
+# retry (up to MAA_ONLINE_MAX_ATTEMPTS).
 #
 # Retries use resume mode: bin/maa-resume-tasks.py inspects the earlier
 # attempts' logs and only the tasks that never reported "<Type> Completed" are
@@ -26,6 +29,12 @@ RESUME_FILE="${MAA_ONLINE_RESUME_OUT:-$ROOT/config/tasks/daily-resume.toml}"
 MAX_ATTEMPTS="${MAA_ONLINE_MAX_ATTEMPTS:-3}"
 STALL_FAILS="${MAA_ONLINE_STALL_FAILS:-12}"              # consecutive ScreencapFailed (~24s+)
 ATTEMPT_MAX_SECONDS="${MAA_ONLINE_ATTEMPT_MAX_SECONDS:-3000}"  # per-attempt ceiling
+# Pre-flight: after /start, watch the game screen and tap through the boot flow
+# (title -> login -> loading) until a recognizable in-game screen appears.
+# The first session of the day can sit on an unrecognizable screen for ~10 min
+# while the game does first-login resource processing; without this, MAA burns
+# the whole attempt (and its quota) failing recognition on every task.
+PREFLIGHT_MAX_SECONDS="${MAA_ONLINE_PREFLIGHT_MAX_SECONDS:-780}"
 
 mkdir -p "$LOG_DIR"
 
@@ -87,6 +96,37 @@ if [ -n "${MAA_ONLINE_RESUME_FROM:-}" ]; then
     echo "[daily-run] seeded resume planning with: ${attempt_logs[*]}"
 fi
 
+# Screen classes by PNG size, calibrated on real captures (2026-09-23):
+#   black/loading <20KB | login 200-350KB (开始唤醒) | title ~480KB |
+#   announcement/menu >=650KB (hand off to MAA)
+preflight() { # arg1: max seconds; returns 0 once the screen looks in-game
+    local max="$1" elapsed=0 last_action=-20
+    local png=/tmp/maa-preflight.png
+    while [ "$elapsed" -lt "$max" ]; do
+        if api GET /screencap > "$png" 2>/dev/null; then
+            local size
+            size=$(stat -c %s "$png" 2>/dev/null || echo 0)
+            if [ "$size" -ge 650000 ]; then
+                echo "[daily-run] preflight: ready after ${elapsed}s (screen ${size}B, in-game class)"
+                return 0
+            fi
+            if [ $((elapsed - last_action)) -ge 12 ]; then
+                if [ "$size" -ge 200000 ] && [ "$size" -lt 350000 ]; then
+                    api POST /click '{"x":640,"y":510}' >/dev/null 2>&1
+                    echo "[daily-run] preflight: ${elapsed}s login-class screen (${size}B); tapping 开始唤醒"
+                else
+                    api POST /click '{"x":640,"y":360}' >/dev/null 2>&1
+                    echo "[daily-run] preflight: ${elapsed}s screen ${size}B; tapping center"
+                fi
+                last_action=$elapsed
+            fi
+        fi
+        sleep 6
+        elapsed=$((elapsed + 6))
+    done
+    return 1
+}
+
 plan_tasks() { # echoes the task file to run ("daily", "daily-resume" or "NONE")
     if [ "${#attempt_logs[@]}" -eq 0 ]; then
         echo daily
@@ -122,6 +162,14 @@ while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
     if ! api POST /start; then
         echo "[daily-run] attempt $attempt: /start failed (cloud service or token issue)" >&2
         sleep 20
+        continue
+    fi
+    echo "[daily-run] attempt $attempt: preflight: waiting for a recognizable game screen (max ${PREFLIGHT_MAX_SECONDS}s) ..."
+    if ! preflight "$PREFLIGHT_MAX_SECONDS"; then
+        REASON="preflight timed out after ${PREFLIGHT_MAX_SECONDS}s; game screen never became ready"
+        echo "[daily-run] attempt $attempt failed: $REASON; releasing cloud session" >&2
+        api POST /exit >/dev/null 2>&1 || true
+        sleep 30
         continue
     fi
     RUN_LOG="$LOG_DIR/maa-daily-$(date +%Y%m%d-%H%M%S).log"
