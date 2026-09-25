@@ -76,6 +76,14 @@ run_daily_watchdog() { # arg1: log file, arg2: task file name; sets REASON on ab
             REASON="MAA reported Disconnected (cloud session lost)"
             break
         fi
+        if grep -qE '\] StartUp Error$' "$log" 2>/dev/null; then
+            # When StartUp fails, every later task fails too (observed on
+            # 2026-09-23/24/25): the game screen is not ready. Abort now
+            # instead of burning ~7 more minutes of quota on the remaining
+            # tasks; the retry's preflight will find a ready screen.
+            REASON="StartUp failed; game screen not ready (remaining tasks would fail too)"
+            break
+        fi
     done
     if [ -n "$REASON" ]; then
         echo "[daily-run] watchdog: $REASON; aborting attempt" >&2
@@ -100,25 +108,33 @@ fi
 #   black/loading <20KB | login 200-350KB (开始唤醒) | title ~480KB |
 #   announcement/menu >=650KB (hand off to MAA)
 preflight() { # arg1: max seconds; returns 0 once the screen looks in-game
-    local max="$1" elapsed=0 last_action=-20
+    local max="$1" elapsed=0 last_action=-20 ready_hits=0
     local png=/tmp/maa-preflight.png
     while [ "$elapsed" -lt "$max" ]; do
         if api GET /screencap > "$png" 2>/dev/null; then
             local size
             size=$(stat -c %s "$png" 2>/dev/null || echo 0)
             if [ "$size" -ge 650000 ]; then
-                echo "[daily-run] preflight: ready after ${elapsed}s (screen ${size}B, in-game class)"
-                return 0
-            fi
-            if [ $((elapsed - last_action)) -ge 12 ]; then
-                if [ "$size" -ge 200000 ] && [ "$size" -lt 350000 ]; then
-                    api POST /click '{"x":640,"y":510}' >/dev/null 2>&1
-                    echo "[daily-run] preflight: ${elapsed}s login-class screen (${size}B); tapping 开始唤醒"
-                else
-                    api POST /click '{"x":640,"y":360}' >/dev/null 2>&1
-                    echo "[daily-run] preflight: ${elapsed}s screen ${size}B; tapping center"
+                # Require the in-game-class screen to be stable: a single large
+                # frame can still be a loading/transition screen (2026-09-25
+                # attempt 1 handed a 679KB not-ready screen to MAA this way).
+                ready_hits=$((ready_hits + 1))
+                if [ "$ready_hits" -ge 2 ]; then
+                    echo "[daily-run] preflight: ready after ${elapsed}s (screen ${size}B, in-game class, stable)"
+                    return 0
                 fi
-                last_action=$elapsed
+            else
+                ready_hits=0
+                if [ $((elapsed - last_action)) -ge 12 ]; then
+                    if [ "$size" -ge 200000 ] && [ "$size" -lt 350000 ]; then
+                        api POST /click '{"x":640,"y":510}' >/dev/null 2>&1
+                        echo "[daily-run] preflight: ${elapsed}s login-class screen (${size}B); tapping 开始唤醒"
+                    else
+                        api POST /click '{"x":640,"y":360}' >/dev/null 2>&1
+                        echo "[daily-run] preflight: ${elapsed}s screen ${size}B; tapping center"
+                    fi
+                    last_action=$elapsed
+                fi
             fi
         fi
         sleep 6
