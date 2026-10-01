@@ -135,12 +135,18 @@ preflight() { # arg1: max seconds, arg2: attempt no.; returns 0 once the screen 
             else
                 ready_hits=0
                 if [ $((elapsed - last_action)) -ge 12 ]; then
+                    # The resource-check tips screen sits indefinitely until its
+                    # bottom-center START button is tapped (2026-10-01 preflight
+                    # captures). Its PNG size overlaps both the login and title
+                    # bands, so tap START on every cycle, plus the branch-specific
+                    # position. (640,680) is inert on every other known screen.
+                    api POST /click '{"x":640,"y":680}' >/dev/null 2>&1
                     if [ "$size" -ge 200000 ] && [ "$size" -lt 350000 ]; then
                         api POST /click '{"x":640,"y":510}' >/dev/null 2>&1
-                        echo "[daily-run] preflight: ${elapsed}s login-class screen (${size}B); tapping 开始唤醒"
+                        echo "[daily-run] preflight: ${elapsed}s login-class screen (${size}B); tapping START + 开始唤醒"
                     else
                         api POST /click '{"x":640,"y":360}' >/dev/null 2>&1
-                        echo "[daily-run] preflight: ${elapsed}s screen ${size}B; tapping center"
+                        echo "[daily-run] preflight: ${elapsed}s screen ${size}B; tapping START + center"
                     fi
                     last_action=$elapsed
                 fi
