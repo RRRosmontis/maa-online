@@ -56,6 +56,15 @@ client_type = "Official"
 
 # 4. 好友信用与信用商店
 [[tasks]]
+name = "领取奖励"
+type = "Award"
+
+[tasks.params]
+award = true
+mail = true
+recruit = false
+orundum = false
+[[tasks]]
 name = "信用商店"
 type = "Mall"
 
@@ -71,12 +80,3 @@ credit_fight = false
 formation_index = 0
 
 # 5. 领取日常和周常任务奖励
-[[tasks]]
-name = "领取奖励"
-type = "Award"
-
-[tasks.params]
-award = true
-mail = true
-recruit = false
-orundum = false
